@@ -1,0 +1,20 @@
+{
+  "name": "x402get",
+  "version": "1.0.0",
+  "description": "CLI tool for HTTP GET with x402 payment support",
+  "main": "dist/cli.js",
+  "bin": {
+    "x402get": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "ethers": "^6.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}
