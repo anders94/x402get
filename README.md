@@ -6,7 +6,7 @@ A CLI tool for HTTP GET requests with automatic [x402](https://www.x402.org/) pa
 
 ```bash
 # Run directly with npx
-npx x402get @anders94/x402get
+npx x402get https://google.com
 
 # Or install globally
 npm install -g x402get
@@ -19,7 +19,7 @@ git clone https://github.com/anders94/x402get.git
 cd x402get
 npm install
 npm run build
-node dist/cli.js @anders94/x402get
+node dist/cli.js x402get
 ```
 
 Requires Node.js 20+ (for native `fetch`).
@@ -27,7 +27,7 @@ Requires Node.js 20+ (for native `fetch`).
 ## Usage
 
 ```bash
-x402get @anders94/x402get [options]
+x402get url [options]
 ```
 
 ### Options
