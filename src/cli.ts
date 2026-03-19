@@ -14,8 +14,6 @@ import {
   formatAmount,
   signPayment,
   buildPaymentHeader,
-  getPaymentAmount,
-  type SignResult,
 } from "./x402";
 
 function log(msg: string) {
@@ -172,8 +170,7 @@ async function main() {
     getBalance(provider, requirement.asset, wallet.address),
   ]);
 
-  const paymentAmount = getPaymentAmount(requirement);
-  const price = formatAmount(paymentAmount, tokenInfo.decimals);
+  const price = formatAmount(requirement.amount, tokenInfo.decimals);
   const balanceFormatted = formatAmount(balance, tokenInfo.decimals);
 
   // Resolve resource URL and description from challenge or requirement
@@ -201,7 +198,7 @@ async function main() {
   log(`Balance:     ${balanceFormatted} ${tokenInfo.symbol}`);
   log("");
 
-  if (balance < BigInt(paymentAmount)) {
+  if (balance < BigInt(requirement.amount)) {
     log(
       `Error: Insufficient balance. Need ${price} ${tokenInfo.symbol}, have ${balanceFormatted} ${tokenInfo.symbol}`
     );
@@ -215,14 +212,7 @@ async function main() {
   }
 
   log("Signing payment...");
-  const signResult = await signPayment(
-    wallet,
-    provider,
-    requirement,
-    chainId,
-    tokenInfo
-  );
-
+  const signResult = await signPayment(wallet, requirement, chainId, tokenInfo);
   const paymentHeader = buildPaymentHeader(requirement, signResult);
   log(`Payment header (decoded): ${JSON.stringify(JSON.parse(Buffer.from(paymentHeader, "base64").toString("utf-8")), null, 2)}`);
 
