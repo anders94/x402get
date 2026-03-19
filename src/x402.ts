@@ -6,16 +6,12 @@ export interface PaymentRequirement {
   network: string;
   maxAmountRequired?: string;
   amount?: string;
-  resource: string | { url: string; description?: string };
+  resource?: string | { url: string; description?: string };
   description?: string;
   asset: string;
   payTo: string;
-  extra?: {
-    name?: string;
-    version?: string;
-    validAfter?: string;
-    validBefore?: string;
-  };
+  maxTimeoutSeconds?: number;
+  extra?: Record<string, unknown>;
 }
 
 export interface PaymentChallenge {
@@ -32,6 +28,13 @@ export interface TokenInfo {
   name: string;
 }
 
+export interface SignResult {
+  signature: string;
+  payload: Record<string, unknown>;
+}
+
+const SUPPORTED_SCHEMES = ["exact", "eip2612"];
+
 export function parsePaymentChallenge(response: Response): PaymentChallenge {
   const header = response.headers.get("payment-required");
   if (!header) {
@@ -44,7 +47,9 @@ export function parsePaymentChallenge(response: Response): PaymentChallenge {
 export function selectPaymentOption(
   challenge: PaymentChallenge
 ): PaymentRequirement | null {
-  const options = challenge.accepts.filter((a) => a.scheme === "exact");
+  const options = challenge.accepts.filter((a) =>
+    SUPPORTED_SCHEMES.includes(a.scheme)
+  );
   if (options.length === 0) return null;
   // Prefer entries that already have extra.name (EIP-712 domain info provided)
   const withDomain = options.filter((a) => a.extra?.name);
@@ -52,7 +57,6 @@ export function selectPaymentOption(
 }
 
 export function parseChainId(network: string): number {
-  // CAIP-2 format: eip155:<chainId>
   const match = network.match(/^eip155:(\d+)$/);
   if (!match) {
     throw new Error(`Unsupported network format: ${network}`);
@@ -95,31 +99,26 @@ export function getPaymentAmount(requirement: PaymentRequirement): string {
   return requirement.maxAmountRequired || requirement.amount || "0";
 }
 
-export async function signPayment(
+async function signEIP3009(
   wallet: ethers.Wallet,
   requirement: PaymentRequirement,
   chainId: number,
   tokenInfo: TokenInfo
-): Promise<{ signature: string; authorization: Record<string, unknown> }> {
+): Promise<SignResult> {
   const extra = requirement.extra || {};
   const from = wallet.address;
   const to = requirement.payTo;
   const value = getPaymentAmount(requirement);
-  const validAfter = extra.validAfter || "0";
+  const validAfter = (extra.validAfter as string) || "0";
   const validBefore =
-    extra.validBefore || "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-
-  // Generate a random nonce (32 bytes)
+    (extra.validBefore as string) ||
+    "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
   const nonce = ethers.hexlify(ethers.randomBytes(32));
 
-  // Use extra.name if provided, otherwise fall back to on-chain token name
-  const domainName = extra.name || tokenInfo.name;
-  const domainVersion = extra.version || "2";
-
   const domain = {
-    name: domainName,
-    version: domainVersion,
-    chainId: chainId,
+    name: (extra.name as string) || tokenInfo.name,
+    version: (extra.version as string) || "2",
+    chainId,
     verifyingContract: ethers.getAddress(requirement.asset),
   };
 
@@ -134,42 +133,96 @@ export async function signPayment(
     ],
   };
 
+  const message = { from, to, value, validAfter, validBefore, nonce };
+  const signature = await wallet.signTypedData(domain, types, message);
+
+  return {
+    signature,
+    payload: {
+      signature,
+      authorization: { from, to, value, validAfter, validBefore, nonce },
+    },
+  };
+}
+
+async function signEIP2612(
+  wallet: ethers.Wallet,
+  provider: ethers.JsonRpcProvider,
+  requirement: PaymentRequirement,
+  chainId: number,
+  tokenInfo: TokenInfo
+): Promise<SignResult> {
+  const extra = requirement.extra || {};
+  const owner = wallet.address;
+  const spender = requirement.payTo;
+  const value = getPaymentAmount(requirement);
+
+  // Fetch the sequential nonce from the token contract
+  const contract = new ethers.Contract(requirement.asset, ERC20_ABI, provider);
+  const nonce: bigint = await contract.nonces(owner);
+
+  // Deadline: now + maxTimeoutSeconds (or 60s default)
+  const timeout = requirement.maxTimeoutSeconds || 60;
+  const deadline = Math.floor(Date.now() / 1000) + timeout;
+
+  const domain = {
+    name: (extra.name as string) || tokenInfo.name,
+    version: (extra.version as string) || "1",
+    chainId,
+    verifyingContract: ethers.getAddress(requirement.asset),
+  };
+
+  const types = {
+    Permit: [
+      { name: "owner", type: "address" },
+      { name: "spender", type: "address" },
+      { name: "value", type: "uint256" },
+      { name: "nonce", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+    ],
+  };
+
   const message = {
-    from,
-    to,
+    owner,
+    spender,
     value,
-    validAfter,
-    validBefore,
-    nonce,
+    nonce: nonce.toString(),
+    deadline: deadline.toString(),
   };
 
   const signature = await wallet.signTypedData(domain, types, message);
 
   return {
     signature,
-    authorization: {
-      from,
-      to,
-      value,
-      validAfter,
-      validBefore,
-      nonce,
+    payload: {
+      signature,
+      permit: { owner, spender, value, nonce: nonce.toString(), deadline: deadline.toString() },
     },
   };
 }
 
+export async function signPayment(
+  wallet: ethers.Wallet,
+  provider: ethers.JsonRpcProvider,
+  requirement: PaymentRequirement,
+  chainId: number,
+  tokenInfo: TokenInfo
+): Promise<SignResult> {
+  if (requirement.scheme === "eip2612") {
+    return signEIP2612(wallet, provider, requirement, chainId, tokenInfo);
+  }
+  return signEIP3009(wallet, requirement, chainId, tokenInfo);
+}
+
 export function buildPaymentHeader(
   requirement: PaymentRequirement,
-  signature: string,
-  authorization: Record<string, unknown>
+  signResult: SignResult
 ): string {
   const header = {
     x402Version: 2,
-    accepted: requirement,
-    payload: {
-      signature,
-      authorization,
-    },
+    scheme: requirement.scheme,
+    network: requirement.network,
+    payload: signResult.payload,
   };
   return Buffer.from(JSON.stringify(header)).toString("base64");
 }

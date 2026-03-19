@@ -15,6 +15,7 @@ import {
   signPayment,
   buildPaymentHeader,
   getPaymentAmount,
+  type SignResult,
 } from "./x402";
 
 function log(msg: string) {
@@ -214,14 +215,16 @@ async function main() {
   }
 
   log("Signing payment...");
-  const { signature, authorization } = await signPayment(
+  const signResult = await signPayment(
     wallet,
+    provider,
     requirement,
     chainId,
     tokenInfo
   );
 
-  const paymentHeader = buildPaymentHeader(requirement, signature, authorization);
+  const paymentHeader = buildPaymentHeader(requirement, signResult);
+  log(`Payment header (decoded): ${JSON.stringify(JSON.parse(Buffer.from(paymentHeader, "base64").toString("utf-8")), null, 2)}`);
 
   log("Retrying request with payment...");
   let paidResponse: Response;
