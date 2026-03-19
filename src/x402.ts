@@ -4,8 +4,9 @@ import { ERC20_ABI, KNOWN_TOKENS } from "./constants";
 export interface PaymentRequirement {
   scheme: string;
   network: string;
-  maxAmountRequired: string;
-  resource: string;
+  maxAmountRequired?: string;
+  amount?: string;
+  resource: string | { url: string; description?: string };
   description?: string;
   asset: string;
   payTo: string;
@@ -21,6 +22,8 @@ export interface PaymentChallenge {
   accepts: PaymentRequirement[];
   error?: string;
   version?: string;
+  x402Version?: number;
+  resource?: { url?: string; description?: string } | string;
 }
 
 export interface TokenInfo {
@@ -41,11 +44,11 @@ export function parsePaymentChallenge(response: Response): PaymentChallenge {
 export function selectPaymentOption(
   challenge: PaymentChallenge
 ): PaymentRequirement | null {
-  const eip3009Options = challenge.accepts.filter(
-    (a) => a.scheme === "exact" && a.extra?.name
-  );
-  if (eip3009Options.length === 0) return null;
-  return eip3009Options[0];
+  const options = challenge.accepts.filter((a) => a.scheme === "exact");
+  if (options.length === 0) return null;
+  // Prefer entries that already have extra.name (EIP-712 domain info provided)
+  const withDomain = options.filter((a) => a.extra?.name);
+  return withDomain.length > 0 ? withDomain[0] : options[0];
 }
 
 export function parseChainId(network: string): number {
@@ -88,15 +91,20 @@ export function formatAmount(amount: string | bigint, decimals: number): string 
   return ethers.formatUnits(amount, decimals);
 }
 
+export function getPaymentAmount(requirement: PaymentRequirement): string {
+  return requirement.maxAmountRequired || requirement.amount || "0";
+}
+
 export async function signPayment(
   wallet: ethers.Wallet,
   requirement: PaymentRequirement,
-  chainId: number
+  chainId: number,
+  tokenInfo: TokenInfo
 ): Promise<{ signature: string; authorization: Record<string, unknown> }> {
-  const extra = requirement.extra!;
+  const extra = requirement.extra || {};
   const from = wallet.address;
   const to = requirement.payTo;
-  const value = requirement.maxAmountRequired;
+  const value = getPaymentAmount(requirement);
   const validAfter = extra.validAfter || "0";
   const validBefore =
     extra.validBefore || "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
@@ -104,9 +112,13 @@ export async function signPayment(
   // Generate a random nonce (32 bytes)
   const nonce = ethers.hexlify(ethers.randomBytes(32));
 
+  // Use extra.name if provided, otherwise fall back to on-chain token name
+  const domainName = extra.name || tokenInfo.name;
+  const domainVersion = extra.version || "2";
+
   const domain = {
-    name: extra.name!,
-    version: extra.version || "2",
+    name: domainName,
+    version: domainVersion,
     chainId: chainId,
     verifyingContract: ethers.getAddress(requirement.asset),
   };
@@ -151,14 +163,13 @@ export function buildPaymentHeader(
   signature: string,
   authorization: Record<string, unknown>
 ): string {
-  const payload = {
+  const header = {
     x402Version: 2,
-    scheme: requirement.scheme,
-    network: requirement.network,
+    accepted: requirement,
     payload: {
       signature,
       authorization,
     },
   };
-  return Buffer.from(JSON.stringify(payload)).toString("base64");
+  return Buffer.from(JSON.stringify(header)).toString("base64");
 }

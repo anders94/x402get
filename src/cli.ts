@@ -14,6 +14,7 @@ import {
   formatAmount,
   signPayment,
   buildPaymentHeader,
+  getPaymentAmount,
 } from "./x402";
 
 function log(msg: string) {
@@ -106,12 +107,28 @@ async function main() {
 
   // --- 402 Payment Required ---
 
+  // Dump raw headers for debugging
+  const rawHeader = response.headers.get("payment-required");
   let challenge;
   try {
     challenge = parsePaymentChallenge(response);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     log(`Error parsing payment challenge: ${msg}`);
+    if (rawHeader) {
+      log(`\nRaw PAYMENT-REQUIRED header:\n${rawHeader}`);
+      try {
+        const decoded = Buffer.from(rawHeader, "base64").toString("utf-8");
+        log(`\nDecoded:\n${decoded}`);
+      } catch {
+        // not base64
+      }
+    }
+    // Show all response headers
+    log("\nResponse headers:");
+    response.headers.forEach((value, key) => {
+      log(`  ${key}: ${value}`);
+    });
     process.exit(1);
   }
 
@@ -121,6 +138,7 @@ async function main() {
     log(
       `Available schemes: ${challenge.accepts.map((a) => a.scheme).join(", ")}`
     );
+    log(`\nFull challenge:\n${JSON.stringify(challenge, null, 2)}`);
     process.exit(1);
   }
 
@@ -153,14 +171,27 @@ async function main() {
     getBalance(provider, requirement.asset, wallet.address),
   ]);
 
-  const price = formatAmount(requirement.maxAmountRequired, tokenInfo.decimals);
+  const paymentAmount = getPaymentAmount(requirement);
+  const price = formatAmount(paymentAmount, tokenInfo.decimals);
   const balanceFormatted = formatAmount(balance, tokenInfo.decimals);
+
+  // Resolve resource URL and description from challenge or requirement
+  const chalResource = challenge.resource;
+  const reqResource = requirement.resource;
+  const resourceUrl =
+    (typeof chalResource === "object" ? chalResource.url : chalResource) ||
+    (typeof reqResource === "object" ? reqResource.url : reqResource) ||
+    url;
+  const description =
+    (typeof chalResource === "object" ? chalResource.description : undefined) ||
+    (typeof reqResource === "object" ? reqResource.description : undefined) ||
+    requirement.description;
 
   log("");
   log("=== x402 Payment Required ===");
-  log(`Resource:    ${requirement.resource || url}`);
-  if (requirement.description) {
-    log(`Description: ${requirement.description}`);
+  log(`Resource:    ${resourceUrl}`);
+  if (description) {
+    log(`Description: ${description}`);
   }
   log(`Price:       ${price} ${tokenInfo.symbol}`);
   log(`Network:     ${chainName}`);
@@ -169,7 +200,7 @@ async function main() {
   log(`Balance:     ${balanceFormatted} ${tokenInfo.symbol}`);
   log("");
 
-  if (balance < BigInt(requirement.maxAmountRequired)) {
+  if (balance < BigInt(paymentAmount)) {
     log(
       `Error: Insufficient balance. Need ${price} ${tokenInfo.symbol}, have ${balanceFormatted} ${tokenInfo.symbol}`
     );
@@ -186,7 +217,8 @@ async function main() {
   const { signature, authorization } = await signPayment(
     wallet,
     requirement,
-    chainId
+    chainId,
+    tokenInfo
   );
 
   const paymentHeader = buildPaymentHeader(requirement, signature, authorization);
@@ -209,6 +241,18 @@ async function main() {
     log(`Error: Payment request returned HTTP ${paidResponse.status}`);
     const body = await paidResponse.text().catch(() => "");
     if (body) log(body);
+    // Show payment-related response headers
+    const paidPaymentHeader = paidResponse.headers.get("payment-required");
+    if (paidPaymentHeader) {
+      try {
+        const decoded = JSON.parse(
+          Buffer.from(paidPaymentHeader, "base64").toString("utf-8")
+        );
+        log(`\nServer payment response:\n${JSON.stringify(decoded, null, 2)}`);
+      } catch {
+        log(`\nRaw PAYMENT-REQUIRED header:\n${paidPaymentHeader}`);
+      }
+    }
     process.exit(1);
   }
 
