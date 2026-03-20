@@ -214,7 +214,7 @@ async function main() {
   }
 
   log("Signing payment...");
-  const signResult = await signPayment(wallet, requirement, chainId, tokenInfo);
+  const signResult = await signPayment(wallet, provider, requirement, chainId, tokenInfo);
   const paymentHeader = buildPaymentHeader(requirement, signResult);
 
   log("Retrying request with payment...");

@@ -35,6 +35,7 @@ export interface TokenInfo {
 export interface SignResult {
   signature: string;
   payload: Record<string, unknown>;
+  extensions?: Record<string, unknown>;
 }
 
 export function parsePaymentChallenge(response: Response): PaymentChallenge {
@@ -148,11 +149,70 @@ async function signEIP3009(
   };
 }
 
+// Sign an EIP-2612 permit to approve Permit2 to spend the token
+async function signEIP2612Permit(
+  wallet: ethers.Wallet,
+  provider: ethers.JsonRpcProvider,
+  requirement: PaymentRequirement,
+  chainId: number,
+  tokenInfo: TokenInfo,
+  deadline: string
+): Promise<Record<string, unknown>> {
+  const extra = requirement.extra || {};
+  const tokenAddress = ethers.getAddress(requirement.asset);
+  const contract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
+
+  const nonce: bigint = await contract.nonces(wallet.address);
+
+  const domain = {
+    name: (extra.name as string) || tokenInfo.name,
+    version: (extra.version as string) || "1",
+    chainId,
+    verifyingContract: tokenAddress,
+  };
+
+  const types = {
+    Permit: [
+      { name: "owner", type: "address" },
+      { name: "spender", type: "address" },
+      { name: "value", type: "uint256" },
+      { name: "nonce", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+    ],
+  };
+
+  // Approve max uint256 to Permit2
+  const approvalAmount = ethers.MaxUint256.toString();
+
+  const message = {
+    owner: wallet.address,
+    spender: ethers.getAddress(PERMIT2_ADDRESS),
+    value: BigInt(approvalAmount),
+    nonce,
+    deadline: BigInt(deadline),
+  };
+
+  const signature = await wallet.signTypedData(domain, types, message);
+
+  return {
+    from: wallet.address,
+    asset: tokenAddress,
+    spender: ethers.getAddress(PERMIT2_ADDRESS),
+    amount: approvalAmount,
+    nonce: nonce.toString(),
+    deadline,
+    signature,
+    version: (extra.version as string) || "1",
+  };
+}
+
 // Permit2 PermitWitnessTransferFrom signing
 async function signPermit2(
   wallet: ethers.Wallet,
+  provider: ethers.JsonRpcProvider,
   requirement: PaymentRequirement,
-  chainId: number
+  chainId: number,
+  tokenInfo: TokenInfo
 ): Promise<SignResult> {
   const now = Math.floor(Date.now() / 1000);
   const validAfter = (now - 600).toString(); // 10 min clock skew tolerance
@@ -217,26 +277,46 @@ async function signPermit2(
     },
   };
 
-  const signature = await wallet.signTypedData(domain, types, message);
+  const permit2Signature = await wallet.signTypedData(domain, types, message);
+
+  // Check if Permit2 already has sufficient allowance on the token
+  const tokenContract = new ethers.Contract(requirement.asset, ERC20_ABI, provider);
+  const currentAllowance: bigint = await tokenContract.allowance(
+    wallet.address,
+    PERMIT2_ADDRESS
+  );
+
+  let extensions: Record<string, unknown> | undefined;
+  if (currentAllowance < BigInt(requirement.amount)) {
+    // Need EIP-2612 gas sponsoring to approve Permit2
+    const eip2612Info = await signEIP2612Permit(
+      wallet, provider, requirement, chainId, tokenInfo, deadline
+    );
+    extensions = {
+      eip2612GasSponsoring: { info: eip2612Info },
+    };
+  }
 
   return {
-    signature,
+    signature: permit2Signature,
     payload: {
-      signature,
+      signature: permit2Signature,
       permit2Authorization,
     },
+    ...(extensions ? { extensions } : {}),
   };
 }
 
 export async function signPayment(
   wallet: ethers.Wallet,
+  provider: ethers.JsonRpcProvider,
   requirement: PaymentRequirement,
   chainId: number,
   tokenInfo: TokenInfo
 ): Promise<SignResult> {
   const method = getTransferMethod(requirement);
   if (method === "permit2") {
-    return signPermit2(wallet, requirement, chainId);
+    return signPermit2(wallet, provider, requirement, chainId, tokenInfo);
   }
   return signEIP3009(wallet, requirement, chainId, tokenInfo);
 }
@@ -246,10 +326,13 @@ export function buildPaymentHeader(
   requirement: PaymentRequirement,
   signResult: SignResult
 ): string {
-  const header = {
+  const header: Record<string, unknown> = {
     x402Version: 2,
     accepted: requirement,
     payload: signResult.payload,
   };
+  if (signResult.extensions) {
+    header.extensions = signResult.extensions;
+  }
   return Buffer.from(JSON.stringify(header)).toString("base64");
 }
