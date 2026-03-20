@@ -1,6 +1,12 @@
 import { ethers } from "ethers";
 import { ERC20_ABI, KNOWN_TOKENS } from "./constants";
 
+// Canonical Permit2 address (same on all EVM chains via CREATE2)
+const PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
+
+// x402 Exact Permit2 Proxy
+const X402_EXACT_PERMIT2_PROXY = "0x402085c248EeA27D92E8b30b2C58ed07f9E20001";
+
 export interface PaymentRequirement {
   scheme: string;
   network: string;
@@ -51,6 +57,10 @@ export function selectPaymentOption(
   return withDomain.length > 0 ? withDomain[0] : options[0];
 }
 
+export function getTransferMethod(requirement: PaymentRequirement): string {
+  return (requirement.extra?.assetTransferMethod as string) || "eip3009";
+}
+
 export function parseChainId(network: string): number {
   const match = network.match(/^eip155:(\d+)$/);
   if (!match) {
@@ -90,8 +100,8 @@ export function formatAmount(amount: string | bigint, decimals: number): string 
   return ethers.formatUnits(amount, decimals);
 }
 
-// EIP-3009 TransferWithAuthorization signing (the "exact" scheme)
-export async function signPayment(
+// EIP-3009 TransferWithAuthorization signing
+async function signEIP3009(
   wallet: ethers.Wallet,
   requirement: PaymentRequirement,
   chainId: number,
@@ -106,10 +116,8 @@ export async function signPayment(
     (extra.validBefore as string) ||
     "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
-  // EIP-3009 uses a random 32-byte nonce
   const nonce = ethers.hexlify(ethers.randomBytes(32));
 
-  // EIP-712 domain: use extra.name/version if provided, fall back to on-chain token name
   const domain = {
     name: (extra.name as string) || tokenInfo.name,
     version: (extra.version as string) || "2",
@@ -138,6 +146,99 @@ export async function signPayment(
       authorization: { from, to, value, validAfter, validBefore, nonce },
     },
   };
+}
+
+// Permit2 PermitWitnessTransferFrom signing
+async function signPermit2(
+  wallet: ethers.Wallet,
+  requirement: PaymentRequirement,
+  chainId: number
+): Promise<SignResult> {
+  const now = Math.floor(Date.now() / 1000);
+  const validAfter = (now - 600).toString(); // 10 min clock skew tolerance
+  const deadline = (now + (requirement.maxTimeoutSeconds || 60)).toString();
+
+  // Random 256-bit nonce as decimal string
+  const nonceBytes = ethers.randomBytes(32);
+  const nonce = BigInt(ethers.hexlify(nonceBytes)).toString();
+
+  const permit2Authorization = {
+    from: wallet.address,
+    permitted: {
+      token: ethers.getAddress(requirement.asset),
+      amount: requirement.amount,
+    },
+    spender: ethers.getAddress(X402_EXACT_PERMIT2_PROXY),
+    nonce,
+    deadline,
+    witness: {
+      to: ethers.getAddress(requirement.payTo),
+      validAfter,
+    },
+  };
+
+  const domain = {
+    name: "Permit2",
+    chainId,
+    verifyingContract: ethers.getAddress(PERMIT2_ADDRESS),
+  };
+
+  // Types must be in alphabetical order after the primary type
+  const types = {
+    PermitWitnessTransferFrom: [
+      { name: "permitted", type: "TokenPermissions" },
+      { name: "spender", type: "address" },
+      { name: "nonce", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+      { name: "witness", type: "Witness" },
+    ],
+    TokenPermissions: [
+      { name: "token", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    Witness: [
+      { name: "to", type: "address" },
+      { name: "validAfter", type: "uint256" },
+    ],
+  };
+
+  // Convert to BigInt for signing as the spec requires uint256
+  const message = {
+    permitted: {
+      token: permit2Authorization.permitted.token,
+      amount: BigInt(permit2Authorization.permitted.amount),
+    },
+    spender: permit2Authorization.spender,
+    nonce: BigInt(permit2Authorization.nonce),
+    deadline: BigInt(permit2Authorization.deadline),
+    witness: {
+      to: permit2Authorization.witness.to,
+      validAfter: BigInt(permit2Authorization.witness.validAfter),
+    },
+  };
+
+  const signature = await wallet.signTypedData(domain, types, message);
+
+  return {
+    signature,
+    payload: {
+      signature,
+      permit2Authorization,
+    },
+  };
+}
+
+export async function signPayment(
+  wallet: ethers.Wallet,
+  requirement: PaymentRequirement,
+  chainId: number,
+  tokenInfo: TokenInfo
+): Promise<SignResult> {
+  const method = getTransferMethod(requirement);
+  if (method === "permit2") {
+    return signPermit2(wallet, requirement, chainId);
+  }
+  return signEIP3009(wallet, requirement, chainId, tokenInfo);
 }
 
 // Build the PAYMENT-SIGNATURE header per x402 v2 spec

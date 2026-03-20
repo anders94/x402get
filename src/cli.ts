@@ -14,6 +14,7 @@ import {
   formatAmount,
   signPayment,
   buildPaymentHeader,
+  getTransferMethod,
 } from "./x402";
 
 function log(msg: string) {
@@ -193,6 +194,7 @@ async function main() {
   }
   log(`Price:       ${price} ${tokenInfo.symbol}`);
   log(`Network:     ${chainName}`);
+  log(`Method:      ${getTransferMethod(requirement)}`);
   log(`Pay to:      ${requirement.payTo}`);
   log(`Wallet:      ${wallet.address}`);
   log(`Balance:     ${balanceFormatted} ${tokenInfo.symbol}`);
