@@ -250,6 +250,8 @@ async function main() {
     process.exit(1);
   }
 
+  log(`Response: HTTP ${paidResponse.status} (${paidResponse.headers.get("content-type") || "no content-type"})`);
+
   // Check for payment response header
   const paymentResponse = paidResponse.headers.get("payment-response");
   if (paymentResponse) {
