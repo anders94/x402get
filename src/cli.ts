@@ -41,31 +41,66 @@ async function confirm(prompt: string): Promise<boolean> {
   });
 }
 
+async function streamToFile(body: ReadableStream<Uint8Array>, filePath: string): Promise<number> {
+  const fileStream = fs.createWriteStream(filePath);
+  let bytes = 0;
+  const reader = body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      fileStream.write(value);
+      bytes += value.length;
+    }
+  } finally {
+    fileStream.end();
+  }
+  return bytes;
+}
+
 async function handleResponse(
   response: Response,
   outputFile: string | undefined
 ) {
   const contentType = response.headers.get("content-type");
+  const body = response.body;
+
+  if (!body) {
+    log("Warning: Empty response body");
+    return;
+  }
 
   if (outputFile) {
-    const buffer = Buffer.from(await response.arrayBuffer());
-    fs.writeFileSync(outputFile, buffer);
-    log(`Saved to ${outputFile} (${buffer.length} bytes)`);
+    const bytes = await streamToFile(body, outputFile);
+    log(`Saved to ${outputFile} (${bytes} bytes)`);
     return;
   }
 
   if (isTextContentType(contentType)) {
-    const text = await response.text();
-    process.stdout.write(text);
-    if (text.length > 0 && !text.endsWith("\n")) {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let lastChar = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const text = decoder.decode(value, { stream: true });
+      process.stdout.write(text);
+      if (text.length > 0) lastChar = text[text.length - 1];
+    }
+    // Flush any remaining bytes
+    const final = decoder.decode();
+    if (final.length > 0) {
+      process.stdout.write(final);
+      lastChar = final[final.length - 1];
+    }
+    if (lastChar && lastChar !== "\n") {
       process.stdout.write("\n");
     }
   } else {
-    const buffer = Buffer.from(await response.arrayBuffer());
     const ext = contentType?.split("/")[1]?.split(";")[0] || "bin";
     const filename = `response.${ext}`;
-    fs.writeFileSync(filename, buffer);
-    log(`Binary response saved to ${filename} (${buffer.length} bytes)`);
+    const bytes = await streamToFile(body, filename);
+    log(`Binary response saved to ${filename} (${bytes} bytes)`);
   }
 }
 
@@ -86,7 +121,7 @@ async function main() {
 
   let response: Response;
   try {
-    response = await fetch(url);
+    response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     log(`Error: ${msg}`);
@@ -106,6 +141,9 @@ async function main() {
   }
 
   // --- 402 Payment Required ---
+
+  // Drain the 402 response body so the connection is released for the retry
+  await response.text().catch(() => {});
 
   // Dump raw headers for debugging
   const rawHeader = response.headers.get("payment-required");
@@ -224,6 +262,7 @@ async function main() {
       headers: {
         "Payment-Signature": paymentHeader,
       },
+      signal: AbortSignal.timeout(120_000), // 2 min timeout for payment processing
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -267,7 +306,13 @@ async function main() {
     }
   }
 
-  await handleResponse(paidResponse, opts.output);
+  try {
+    await handleResponse(paidResponse, opts.output);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log(`Error reading response body: ${msg}`);
+    process.exit(1);
+  }
   log("Done.");
 }
 
