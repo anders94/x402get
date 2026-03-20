@@ -181,8 +181,7 @@ async function signEIP2612Permit(
     ],
   };
 
-  // Approve max uint256 to Permit2
-  const approvalAmount = ethers.MaxUint256.toString();
+  const approvalAmount = requirement.amount;
 
   const message = {
     owner: wallet.address,
